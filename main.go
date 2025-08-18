@@ -8,52 +8,45 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// Student struct (MongoDB model)
-type Student struct {
-	ID    string `json:"id" bson:"_id,omitempty"`
-	Name  string `json:"name" bson:"name"`
-	Age   int    `json:"age" bson:"age"`
-	Grade string `json:"grade" bson:"grade"`
-}
-
 var studentCollection *mongo.Collection
 
-func initMongo() {
-	// Connect to MongoDB
-	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+type Student struct {
+	ID    primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
+	Name  string             `bson:"name" json:"name"`
+	Age   int                `bson:"age" json:"age"`
+	Email string             `bson:"email" json:"email"`
+}
 
-	client, err := mongo.Connect(ctx, clientOptions)
+func main() {
+	// MongoDB connection (only use timeout here)
+	client, err := mongo.NewClient(options.Client().ApplyURI("mongodb://localhost:27017"))
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Ping MongoDB
-	if err := client.Ping(ctx, nil); err != nil {
-		log.Fatal("MongoDB not reachable:", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = client.Connect(ctx)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	// Select DB and collection
-	studentCollection = client.Database("schoolDB").Collection("students")
+	studentCollection = client.Database("studentdb").Collection("students")
 	log.Println("✅ Connected to MongoDB and using 'students' collection")
-}
 
-func main() {
-	// Initialize MongoDB
-	initMongo()
+	// Gin router
+	r := gin.Default()
 
-	// Initialize Gin router
-	router := gin.Default()
-
-	// Create Student
-	router.POST("/students", func(c *gin.Context) {
+	// Create student
+	r.POST("/students", func(c *gin.Context) {
 		var student Student
-		if err := c.BindJSON(&student); err != nil {
+		if err := c.ShouldBindJSON(&student); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -61,36 +54,87 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := studentCollection.InsertOne(ctx, student)
+		res, err := studentCollection.InsertOne(ctx, student)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to insert student"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-
-		c.JSON(http.StatusOK, gin.H{"message": "Student added successfully"})
+		c.JSON(http.StatusOK, res)
 	})
 
-	// Get All Students
-	router.GET("/students", func(c *gin.Context) {
-		var students []Student
+	// Get all students
+	r.GET("/students", func(c *gin.Context) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		cursor, err := studentCollection.Find(ctx, bson.M{})
+		cur, err := studentCollection.Find(ctx, bson.M{})
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch students"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		defer cursor.Close(ctx)
+		defer cur.Close(ctx)
 
-		if err := cursor.All(ctx, &students); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decode students"})
-			return
+		var students []Student
+		for cur.Next(ctx) {
+			var student Student
+			if err := cur.Decode(&student); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			students = append(students, student)
 		}
-
 		c.JSON(http.StatusOK, students)
 	})
 
-	// Run server
-	router.Run(":8080")
+	// Update student by ID
+	r.PUT("/students/:id", func(c *gin.Context) {
+		idParam := c.Param("id")
+		objID, err := primitive.ObjectIDFromHex(idParam)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ID"})
+			return
+		}
+
+		var student Student
+		if err := c.ShouldBindJSON(&student); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		update := bson.M{"$set": bson.M{"name": student.Name, "age": student.Age, "email": student.Email}}
+		_, err = studentCollection.UpdateOne(ctx, bson.M{"_id": objID}, update)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "Student updated"})
+	})
+
+	// Delete student by ID
+	r.DELETE("/students/:id", func(c *gin.Context) {
+		idParam := c.Param("id")
+		objID, err := primitive.ObjectIDFromHex(idParam)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ID"})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, err = studentCollection.DeleteOne(ctx, bson.M{"_id": objID})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "Student deleted"})
+	})
+
+	// Start server
+	r.Run(":8080")
 }
